@@ -1,4 +1,5 @@
 
+#define EXPORT_SYMTAB
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/init.h>
@@ -7,7 +8,6 @@
 #include <linux/pid.h>    
 #include <linux/tty.h> 
 #include <linux/version.h>
-#include <asm/uaccess.h>
 #include <linux/cdev.h>
 
 #define DEVICE_NAME "mailslot"
@@ -50,21 +50,41 @@ static int mailslot_open(struct inode *, struct file *);
 static int mailslot_release(struct inode *, struct file *); 
 
 static ssize_t mailslot_read(struct file *filp, char __user *buff, size_t len, loff_t *off) {
-
-	printk("Called a read on mailslot with minor number %d\n", filp->f_path.dentry->d_inode->i_rdev);
+	
+	int Minor = filp->f_path.dentry->d_inode->i_rdev; 
+	
+	printk("Called a read on mailslot with minor number %d\n", Minor);
 	
 	// get first message 
 
 	// if number of bytes to read is less than message size return -1
+	if (mailslot[Minor].first->size > len) {
+                printk(KERNEL_INFO "Mailslot with next message size %u too large for reader.\n", (unsigned int) mailslot[Minor].first->size );
+                return 0;
+        }
 
 	// if fifo is empty return 0
+	if (mailslot[Minor] == NULL || mailslot[Minor].mailslot_size == 0) {
+		printk(KERNEL_INFO "Mailslot with minor number %u is empty.\n", (unsigned int) Minor);
+		return 0;
+	}
 
 	//copy_to_user message in buff
-	char *hello = "Hello, world\n";
-	copy_to_user(buff, hello, sizeof(hello));
+	if( *off >= hello_size )
+      		return 0;
 
-	// return number of bytes read (message lenght)
-	return (ssize_t) 0;
+   	if( *off + len > hello_size)
+      		len = hello_size - *off;
+	
+   	if (copy_to_user(buff, hello + *off, len) != 0) { 
+		printk(KERN_INFO "copy to user err\n");
+      		return -EFAULT;   
+	} else {
+		printk(KERN_INFO "copy to user OK\n");
+	}
+
+   	*off += len;
+   	return len;
 }
  
 static ssize_t mailslot_write(struct file *filp, const char *buff, size_t len, loff_t *off) {
