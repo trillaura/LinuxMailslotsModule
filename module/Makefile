@@ -1,5 +1,6 @@
 TARGET_MODULE:=mailslots
 
+//$(TARGET_MODULE)-objs += $(TARGET_MODULE).o queue.o
 obj-m += $(TARGET_MODULE).o
 
 all:
