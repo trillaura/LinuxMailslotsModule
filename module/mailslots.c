@@ -33,7 +33,7 @@
 
 static int MAXIMUM_MESSAGE_SIZE = 256;
 
-static int POLICY = 0; // 0 blocking, 1 non-blocking
+static int POLICY = 0; // 1 blocking, 0 non-blocking
 
 static int Major;
 
@@ -47,7 +47,7 @@ typedef struct mailslot_t {
         mailslot_msg_t *first;
         mailslot_msg_t *last;
         size_t size;
-	struct mutex _mutex;
+	struct mutex mux;
 	wait_queue_head_t reader_queue;
 	wait_queue_head_t writer_queue;
 } mailslot_t;
@@ -60,22 +60,6 @@ static long mailslot_ioctl(struct file *, unsigned int, unsigned long);
 static int mailslot_open(struct inode *, struct file *); 
 static int mailslot_release(struct inode *, struct file *); 
 
-static mailslot_t mailslot[DEVICE_FILE_SIZE];
-
-void print_queue(int i) {
-    
-        mailslot_msg_t *head = mailslot[i].first;
-        mailslot_msg_t *tail = mailslot[i].last;
-    
-        printk(KERN_INFO "Queue:\t");
-        while (head != tail) {
-                printk(KERN_INFO ", "); 
-                printk(KERN_INFO "msg: %s size: %u", head->data, head->size);
-                head = head->next;
-        }
-        printk(KERN_INFO "\n");
-}
-
 void initialize(void) {
    	
 	int minor;
@@ -83,7 +67,7 @@ void initialize(void) {
 
 		DEBUG printk(KERN_INFO "Initialize minor %d.\n", minor);
 
-		mutex_init(&mailslot[minor]._mutex); 
+		mutex_init(&mailslot[minor].mux); 
 		init_waitqueue_head(&mailslot[minor].reader_queue);
 		init_waitqueue_head(&mailslot[minor].writer_queue);
         	mailslot[minor].size = 0;
@@ -108,11 +92,13 @@ mailslot_msg_t *new_message(char *text, size_t len) {
         new->size = len;
         new->next = NULL;
 
+        DEBUG printk(KERN_INFO "Created new message mailslot.\n");
         return new;
 }
 
 int is_empty(int minor) {
-        return mailslot[minor].last == NULL;
+	DEBUG printk("Is empty function.\n");
+        return mailslot[minor].size == 0;
 }
 
 int is_full(int minor, size_t len) {
@@ -130,18 +116,18 @@ int enqueue(int minor, char *new_msg) {
                 return -1;
         }
 
-	mutex_lock(&mailslot[minor]._mutex);
+	mutex_lock(&mailslot[minor].mux);
 	
         while (is_full(minor, len)) {
                 DEBUG printk(KERN_INFO "Full mailslot.\n");
 		
-		mutex_unlock(&mailslot[minor]._mutex);
+		mutex_unlock(&mailslot[minor].mux);
 		
 		if (POLICY == 1) 	// non-blocking policy
                 	return -1; 
 		else { 			// blocking policy
 			wait_event_interruptible(mailslot[minor].writer_queue, !is_full(minor, len));
-			mutex_lock(&mailslot[minor]._mutex);
+			mutex_lock(&mailslot[minor].mux);
 		}
         }
         mailslot_msg_t *new = new_message(new_msg, len);
@@ -155,15 +141,16 @@ int enqueue(int minor, char *new_msg) {
         } else {
                 DEBUG printk(KERN_INFO "Empty mailslot.\n");
                 mailslot[minor].first = mailslot[minor].last = new;
+                DEBUG printk(KERN_INFO "Enqueue %s in mailslot.\n", mailslot[minor].first->data);
         }
         mailslot[minor].size += len;
 	
-	mutex_unlock(&mailslot[minor]._mutex);
+	mutex_unlock(&mailslot[minor].mux);
 
 	// wake up sleeping reader waiting for a not-empty queue
 	wake_up_interruptible(&mailslot[minor].reader_queue);
 	
-        DEBUG print_queue(minor);
+        //DEBUG print_queue(minor);
 
         return 0;
 }
@@ -173,7 +160,7 @@ char *dequeue(int minor, mailslot_msg_t *head) {
 	DEBUG printk(KERN_INFO "Dequeue message (minor %d).\n", minor);
         
 	DEBUG printk(KERN_INFO "Before...");
-        DEBUG print_queue(minor);
+        //DEBUG print_queue(minor);
 
         char *message = head->data;
         mailslot[minor].first = mailslot[minor].first->next;
@@ -184,26 +171,33 @@ char *dequeue(int minor, mailslot_msg_t *head) {
 	wake_up_interruptible(&mailslot[minor].writer_queue);
 	
         DEBUG printk("KERN_INFO After...");
-        DEBUG print_queue(minor);
+        //DEBUG print_queue(minor);
 
         return message;
 }
 
 char *dequeue_by_len(int minor, ssize_t len) {
 
-	mutex_lock(&mailslot[minor]._mutex);
-        
+	DEBUG printk(KERN_INFO "Dequeue by len function.\n");
+
+	mutex_lock(&mailslot[minor].mux);
+	
+	DEBUG printk("deque by len after mutex\n");
+	        
 	while (is_empty(minor)) {
 
-		mutex_unlock(&mailslot[minor]._mutex);
+		DEBUG printk("deque by len in while\n");
+		mutex_unlock(&mailslot[minor].mux);
 
                 DEBUG printk(KERN_INFO "Empty mailslot.\n");
                 
-		if (POLICY == 0) 
+		if (!POLICY) { 	// non-blocking 
+			DEBUG printk("Empty non blocking return\n");
 			return "\0";
-		else {
+		} else {
+			DEBUG printk("Empty blocking waiting\n");
 			wait_event_interruptible(mailslot[minor].reader_queue, !is_empty(minor));
-			mutex_lock(&mailslot[minor]._mutex);	
+			mutex_lock(&mailslot[minor].mux);	
 		}	
         }
 
@@ -211,10 +205,10 @@ char *dequeue_by_len(int minor, ssize_t len) {
 
         if (strlen(head->data) <= len) {
                 char *read = dequeue(minor, head);
-		mutex_unlock(&mailslot[minor]._mutex);
+		mutex_unlock(&mailslot[minor].mux);
 		return read;
         }
-	mutex_unlock(&mailslot[minor]._mutex);
+	mutex_unlock(&mailslot[minor].mux);
 	
         DEBUG print_queue(minor);
 
@@ -243,7 +237,7 @@ static ssize_t mailslot_read(struct file *filp, char __user *buff, size_t len, l
                 printk(KERN_INFO "ERROR Copy to user.\n");
                 return -EFAULT;
         } 
-	
+	DEBUG printk("Copied to user '%s'\n", next);	
 	return strlen(next);
 }
  
@@ -258,7 +252,10 @@ static ssize_t mailslot_write(struct file *filp, const char *buff, size_t len, l
 		DEBUG printk(KERN_INFO "ERROR Copy from user.\n");
 		return -EFAULT;
 	}
-
+	DEBUG printk("Copied from user '%s'\n", new_msg);
+	
+	enqueue(get_minor(filp), new_msg);
+	
 	// return written bytes (message lenght)
 	return len;
 } 
