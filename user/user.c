@@ -1,3 +1,11 @@
+/*
+ * @license GPL
+ * @author Laura Trivelloni
+ * 
+ * This application is an example of use of file operations 
+ * offered by mailslot device driver.
+ */
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
@@ -19,6 +27,7 @@ void *writer(void *arg) {
 		printf("Writing %s\n", *(text+i));
 		write(fd, *(text+i), strlen(*(text+i)));
 	} 
+	close(fd);	
 }
 
 void *reader(void *arg) {
@@ -26,15 +35,19 @@ void *reader(void *arg) {
         char buff[256];
 	int i=0;
         while (read(fd, buff, 256) != 0 && i<5) {
-        	printf("%s\n", buff);
+        	printf("Read %s\n", buff);
 		i++;
 		memset(&buff[0], 0, sizeof(buff));
-	}	
+	}
+	close(fd);	
 }
 
 void *controller(void *arg) {
 	int fd = open((char*) arg, O_RDWR);
 	ioctl(fd, 0, 0); 
+	ioctl(fd, 1, 256); 
+	ioctl(fd, 2, 256*100); 
+	close(fd);	
 }
 
 int main(int argc, char **argv) {
@@ -56,15 +69,16 @@ int main(int argc, char **argv) {
 	int status = 0;
 
 	pid_t child;
-	//int w = open(name, O_RDWR);
+
 	if ((child = fork()) == 0) {
 		writer((void *) name);
 		return 0;
 	}
 	waitpid(child, &status, 0);
-	//printf("Written\n");
+
 	reader((void *) name);
 
 	controller((void*)name);
+
 	return 0;
 }

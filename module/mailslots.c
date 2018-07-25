@@ -1,3 +1,13 @@
+/*
+ * @license GPL
+ * @author Laura Trivelloni
+ * 
+ * This module implements a driver of a special device file 
+ * that is accessible according to FIFO style semantic, 
+ * posting or delivering data units atomically and in data separation,
+ * and that is configurable via ioctl interface.
+ */
+
 
 #define EXPORT_SYMTAB
 #include <linux/kernel.h>
@@ -26,10 +36,11 @@
 
 #define DEVICE_FILE_SIZE 256
 
-#define MAXIMUM_SLOT_STORAGE 256*100
-
 #define MINOR_MIN 0
 #define MINOR_MAX (MINOR_MIN + DEVICE_FILE_SIZE - 1)
+
+#define STORAGE_UPPER_LIMIT 256*1000
+static int MAXIMUM_SLOT_STORAGE = 256*100;
 
 static int MAXIMUM_MESSAGE_SIZE = 256;
 
@@ -97,7 +108,6 @@ mailslot_msg_t *new_message(char *text, size_t len) {
 }
 
 int is_empty(int minor) {
-	DEBUG printk("Is empty function.\n");
         return mailslot[minor].size == 0;
 }
 
@@ -123,7 +133,7 @@ int enqueue(int minor, char *new_msg) {
 		
 		mutex_unlock(&mailslot[minor].mux);
 		
-		if (POLICY == 1) 	// non-blocking policy
+		if (!POLICY) 	// non-blocking policy
                 	return -1; 
 		else { 			// blocking policy
 			wait_event_interruptible(mailslot[minor].writer_queue, !is_full(minor, len));
@@ -150,8 +160,6 @@ int enqueue(int minor, char *new_msg) {
 	// wake up sleeping reader waiting for a not-empty queue
 	wake_up_interruptible(&mailslot[minor].reader_queue);
 	
-        //DEBUG print_queue(minor);
-
         return 0;
 }
 
@@ -159,9 +167,6 @@ char *dequeue(int minor, mailslot_msg_t *head) {
 
 	DEBUG printk(KERN_INFO "Dequeue message (minor %d).\n", minor);
         
-	DEBUG printk(KERN_INFO "Before...");
-        //DEBUG print_queue(minor);
-
         char *message = head->data;
         mailslot[minor].first = mailslot[minor].first->next;
         mailslot[minor].size -= strlen(message);
@@ -170,9 +175,6 @@ char *dequeue(int minor, mailslot_msg_t *head) {
         // wake up sleeping writer waiting for not-full mailslot
 	wake_up_interruptible(&mailslot[minor].writer_queue);
 	
-        DEBUG printk("KERN_INFO After...");
-        //DEBUG print_queue(minor);
-
         return message;
 }
 
@@ -181,12 +183,9 @@ char *dequeue_by_len(int minor, ssize_t len) {
 	DEBUG printk(KERN_INFO "Dequeue by len function.\n");
 
 	mutex_lock(&mailslot[minor].mux);
-	
-	DEBUG printk("deque by len after mutex\n");
-	        
+		        
 	while (is_empty(minor)) {
 
-		DEBUG printk("deque by len in while\n");
 		mutex_unlock(&mailslot[minor].mux);
 
                 DEBUG printk(KERN_INFO "Empty mailslot.\n");
@@ -209,10 +208,11 @@ char *dequeue_by_len(int minor, ssize_t len) {
 		return read;
         }
 	mutex_unlock(&mailslot[minor].mux);
-	
-        DEBUG print_queue(minor);
 
-        return NULL;        
+	// wake up other sleeping readers waiting for a not-empty queue
+	wake_up_interruptible(&mailslot[minor].reader_queue);
+        
+	return NULL;        
 }
 
 
@@ -229,6 +229,7 @@ static ssize_t mailslot_read(struct file *filp, char __user *buff, size_t len, l
         char *next = dequeue_by_len(Minor, len);
     
         if (next == NULL) {
+		
                 printk(KERN_INFO "Buffer %u too small for message size.\n", len);
                 return -1; 
         }
@@ -237,7 +238,9 @@ static ssize_t mailslot_read(struct file *filp, char __user *buff, size_t len, l
                 printk(KERN_INFO "ERROR Copy to user.\n");
                 return -EFAULT;
         } 
+
 	DEBUG printk("Copied to user '%s'\n", next);	
+	
 	return strlen(next);
 }
  
@@ -247,7 +250,6 @@ static ssize_t mailslot_write(struct file *filp, const char *buff, size_t len, l
 
 	char new_msg[MAXIMUM_MESSAGE_SIZE];
 	
-	// copy_from_user from buff to message data
 	if (copy_from_user(new_msg, buff, len) != 0) {
 		DEBUG printk(KERN_INFO "ERROR Copy from user.\n");
 		return -EFAULT;
@@ -256,7 +258,6 @@ static ssize_t mailslot_write(struct file *filp, const char *buff, size_t len, l
 	
 	enqueue(get_minor(filp), new_msg);
 	
-	// return written bytes (message lenght)
 	return len;
 } 
 
@@ -266,16 +267,23 @@ static long mailslot_ioctl(struct file *filp, unsigned int cmd, unsigned long ar
 	
 	if (cmd == 0) {
 		int policy = (int) arg;
-		if (policy) 
-			DEBUG printk(KERN_INFO "Set non-blocking (1) policy command.\n");	
-			if (!policy) 
-			DEBUG printk(KERN_INFO "Set blocking (0) policy command.\n");	
+		if (!policy) 
+			DEBUG printk(KERN_INFO "Set non-blocking (0) policy command.\n");	
+			if (policy) 
+			DEBUG printk(KERN_INFO "Set blocking (1) policy command.\n");	
 		POLICY = policy;
 		return 0;
         }
 	if (cmd == 1) {  
               	DEBUG printk("Change maximum message size command.\n");  
 		MAXIMUM_MESSAGE_SIZE = (int) arg;
+		return 0;
+	}
+	if (cmd == 2) {  
+              	DEBUG printk("Change maximum mailslot storage command.\n");  
+		if ((int) arg > STORAGE_UPPER_LIMIT)
+			MAXIMUM_SLOT_STORAGE = STORAGE_UPPER_LIMIT;
+		MAXIMUM_SLOT_STORAGE = (int) arg;
 		return 0;
 	}
 	DEBUG printk("Not supported command.\n");
@@ -315,11 +323,11 @@ int init_module(void) {
         Major = register_chrdev(0, DEVICE_NAME, &fops);
 
         if (Major < 0) {
-          DEBUG printk("Registering noiser device failed\n");
+          DEBUG printk("Registering device failed\n");
           return Major;
         }
 
-        DEBUG printk(KERN_INFO "Mailslot device registered, it is assigned major number %d\n", Major);
+        printk(KERN_INFO "Mailslot device registered, it is assigned major number %d\n", Major);
 
 	initialize();
 	
@@ -330,5 +338,5 @@ void cleanup_module(void) {
 
         unregister_chrdev(Major, DEVICE_NAME);
 
-        DEBUG printk(KERN_INFO "Mailslot device unregistered, it was assigned major number %d\n", Major);
+        printk(KERN_INFO "Mailslot device unregistered, it was assigned major number %d\n", Major);
 } 
