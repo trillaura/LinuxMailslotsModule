@@ -29,8 +29,9 @@
 #include <linux/version.h>
 #include <linux/wait.h>
 #include <linux/mutex.h>
+#include <asm/atomic.h>
 
-#define DEBUG if(1)
+#define DEBUG if(0)
 
 #define DEVICE_NAME "mailslot"
 
@@ -59,6 +60,10 @@ typedef struct mailslot_t {
         mailslot_msg_t *last;
         size_t size;
 	struct mutex mux;
+
+//	atomic_t reads;
+//	atomic_t writes;
+
 	wait_queue_head_t reader_queue;
 	wait_queue_head_t writer_queue;
 } mailslot_t;
@@ -84,6 +89,9 @@ void initialize(void) {
         	mailslot[minor].size = 0;
         	mailslot[minor].first = NULL;
         	mailslot[minor].last = NULL;
+        	
+//		atomic_set(&mailslot[minor].writes,0);
+//        	atomic_set(&mailslot[minor].reads,0);
 	}
 }
 
@@ -126,6 +134,11 @@ int enqueue(int minor, char *new_msg) {
                 return -1;
         }
 
+        mailslot_msg_t *new = new_message(new_msg, len);
+        
+	if (new == NULL)
+                return -1;
+
 	mutex_lock(&mailslot[minor].mux);
 	
         while (is_full(minor, len)) {
@@ -133,17 +146,14 @@ int enqueue(int minor, char *new_msg) {
 		
 		mutex_unlock(&mailslot[minor].mux);
 		
-		if (!POLICY) 	// non-blocking policy
-                	return -1; 
-		else { 			// blocking policy
+		if (!POLICY) { 	// non-blocking policy
+                	kfree(new);
+			return -1; 
+		} else { 			// blocking policy
 			wait_event_interruptible(mailslot[minor].writer_queue, !is_full(minor, len));
 			mutex_lock(&mailslot[minor].mux);
 		}
         }
-        mailslot_msg_t *new = new_message(new_msg, len);
-
-        if (new == NULL)
-                return -1;
 
         if (!is_empty(minor)) {
                 mailslot[minor].last->next = new;
@@ -224,7 +234,9 @@ static ssize_t mailslot_read(struct file *filp, char __user *buff, size_t len, l
 	
 	int Minor = get_minor(filp); 
 	
-	DEBUG printk(KERN_INFO "Called a read on mailslot with minor number %d\n", Minor);
+//	atomic_inc(&mailslot[Minor].reads);
+
+	DEBUG printk(KERN_INFO "Called read on mailslot with minor number %d\n", Minor);
 	
         char *next = dequeue_by_len(Minor, len);
     
@@ -246,7 +258,11 @@ static ssize_t mailslot_read(struct file *filp, char __user *buff, size_t len, l
  
 static ssize_t mailslot_write(struct file *filp, const char *buff, size_t len, loff_t *off) {
 
-	DEBUG printk(KERN_INFO "Called a write on mailslot with minor number %d\n", get_minor(filp));
+	int Minor = get_minor(filp);
+
+//	atomic_inc(&mailslot[Minor].writes);
+	
+	DEBUG printk(KERN_INFO "Called write on mailslot with minor number %d\n", Minor);
 
 	char new_msg[MAXIMUM_MESSAGE_SIZE];
 	
@@ -304,8 +320,12 @@ static int mailslot_open(struct inode *inode, struct file *file) {
 }
 
 static int mailslot_release(struct inode *inode, struct file *file) {
-
-	DEBUG printk(KERN_INFO "Closed mailslot instance with minor %d\n", get_minor(file));
+	int Minor = get_minor(file);
+	
+	DEBUG printk(KERN_INFO "Closed mailslot instance with minor %d\n", Minor);
+	
+//	printk(KERN_INFO "Called %d writes and %d reads on mailslot with minor number %d\n", 
+//		atomic_read(&mailslot[Minor].writes), atomic_read(&mailslot[Minor].reads), Minor);
 	
 	return 0;
 } 
